@@ -56,13 +56,19 @@ jobs:
           bj_time = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')
           state_file = '.source_state.json'
 
-          # 独立定义 User-Agent 列表
+          # 独立定义 User-Agent 列表和 TLS 指纹穿透支持
           USER_AGENTS = [
               'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
               'Mozilla/5.0 (Linux; Android 13; V2231A Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.43 Mobile Safari/537.36',
               'TVBox/1.1.4 (Linux; Android 11)',
               'okhttp/4.10.0'
           ]
+
+          try:
+              from curl_cffi import requests as cffi_requests
+              HAS_CFFI = True
+          except ImportError:
+              HAS_CFFI = False
 
           # 自动初始化/补充【茄子库】和【无意云】多备用地址
           default_sources_content = (
@@ -148,9 +154,9 @@ jobs:
                       except Exception as e:
                           last_err = f'异常 {str(e)}'
                   
-                  if not success and tvbox_helper.HAS_CFFI:
+                  if not success and HAS_CFFI:
                       try:
-                          res = tvbox_helper.cffi_requests.get(url, impersonate="chrome120", timeout=30)
+                          res = cffi_requests.get(url, impersonate="chrome120", timeout=30)
                           if res.content and len(res.content) > 100:
                               parsed_json, _ = tvbox_helper.parse_tvbox_content(res.content, url)
                               fetched_content = res.content
@@ -242,7 +248,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes detected, skipping commit."
           else
-            git commit -m "Auto update TVBox sources with fixed USER_AGENTS reference"
+            git commit -m "Auto update TVBox sources with local HAS_CFFI definition"
             git push
           fi
         env:
