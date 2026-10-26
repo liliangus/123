@@ -30,28 +30,33 @@ jobs:
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
 
-      - name: 3. 同步上游/拉取更新
+      - name: 3. 定向同步上游核心脚本
         id: sync_upstream
         run: |
-          # 示例：若您是从指定上游仓库同步（如需替换为您的实际目标，请修改 URL）
-          # 留空或按需配置上游远程仓库
           UPSTREAM_URL="https://github.com/yonggekkk/sing-box-yg.git"
           
           echo "正在连接上游仓库: $UPSTREAM_URL"
           git remote add upstream "$UPSTREAM_URL" || git remote set-url upstream "$UPSTREAM_URL"
-          git fetch upstream
+          git fetch upstream main
           
-          # 尝试合并上游更新（此处以合并指定文件或分支为例，采用ort策略避免冲突）
-          # 如果您只想同步特定脚本文件，可以使用 git checkout upstream/main -- script.sh
-          if git merge upstream/main --allow-unrelated-histories --no-commit; then
-            echo "sync_status=success" >> $GITHUB_OUTPUT
-            echo "上游代码拉取与合并成功。"
-          else
-            echo "sync_status=conflict" >> $GITHUB_OUTPUT
-            echo "合并遇到冲突，自动回滚本次合并，请人工介入。"
-            git merge --abort
-            exit 1
-          fi
+          echo "开始定向同步上游脚本文件，跳过 README.md 等文档冲突..."
+          
+          # 精准同步您需要维护的特定脚本文件
+          TARGET_SCRIPTS="lixian_3.sh sb.sh my_funcs.sh"
+          
+          SYNCED=false
+          for script in $TARGET_SCRIPTS; do
+            if git ls-tree -r upstream/main --name-only | grep -q "^$script$"; then
+              git checkout upstream/main -- "$script"
+              echo "✅ 已同步最新文件: $script"
+              SYNCED=true
+            else
+              echo "⚠️ 上游暂未找到文件: $script，跳过"
+            fi
+          done
+          
+          echo "sync_status=success" >> $GITHUB_OUTPUT
+          echo "上游核心脚本定向同步完成。"
 
       - name: 4. 脚本语法有效性校验
         id: validate_scripts
