@@ -22,6 +22,7 @@ try:
 except ImportError:
     pass
 
+# 1. 深度字节解密引擎（完美穿透 HTTP 456、gzip、zlib、Base64、魔术头等）
 def parse_tvbox_content(raw_bytes, target_url=''):
     content_candidates = []
     if b'IEND' in raw_bytes:
@@ -114,6 +115,7 @@ def parse_tvbox_content(raw_bytes, target_url=''):
         
     return json_data, clean_content
 
+# 2. 高阶资源下载函数（兼容 456 状态码放行）
 def download_file(url, save_path, base_url=None):
     if not url or not isinstance(url, str): return False
     if "127.0.0.1" in url or "localhost" in url: return False
@@ -153,11 +155,13 @@ def download_file(url, save_path, base_url=None):
             pass
     return False
 
+# 3. 完整 Spider、Jar 及 lib 资源本地化与 PHP 伪装后缀引擎（参考 tvbox_helper_3.py）
 def process_spider_and_jars(json_data, target_dir, active_target_url=None):
     if not isinstance(json_data, dict): return json_data
     lib_dir = os.path.join(target_dir, "lib")
     os.makedirs(lib_dir, exist_ok=True)
 
+    # 全局 spider 处理
     spider = json_data.get("spider", "")
     if spider and isinstance(spider, str):
         parts = spider.split(';')
@@ -175,6 +179,7 @@ def process_spider_and_jars(json_data, target_dir, active_target_url=None):
                 parts[0] = url_or_path + "?.jar"
                 json_data["spider"] = ';'.join(parts)
 
+    # sites 子源 jar 处理
     sites = json_data.get("sites", [])
     for site in sites:
         if not isinstance(site, dict): continue
@@ -199,6 +204,7 @@ def process_spider_and_jars(json_data, target_dir, active_target_url=None):
                 if download_file(ext, save_path, base_url=active_target_url):
                     site["ext"] = f"./lib/{filename}"
 
+    # lives 直播源处理
     lives = json_data.get("lives", [])
     for live in lives:
         if not isinstance(live, dict): continue
@@ -275,6 +281,7 @@ try:
             for ua in USER_AGENTS:
                 try:
                     res = requests.get(url, headers={'User-Agent': ua, 'Referer': domain_referer}, timeout=30, verify=False)
+                    # 允许任意状态码（如 200 或 456 防爬虫拦截），只要内容有效就通过
                     if res.content and len(res.content) > 50:
                         try:
                             parsed_json, _ = parse_tvbox_content(res.content, url)
@@ -324,6 +331,7 @@ try:
                 with open(output_path, 'w', encoding='utf-8') as f:
                     json.dump(parsed_json, f, ensure_ascii=False, indent=2)
 
+                # 完整同步本地化与 Jar/Spider 下载流水线
                 local_json_data = json.loads(json.dumps(parsed_json))
                 local_json_data = process_spider_and_jars(local_json_data, target_dir, working_url)
 
