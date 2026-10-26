@@ -1,5 +1,3 @@
 # 格式：文件夹名称, 主地址 | 备用地址1 | 备用地址2
 无意云,https://yc.wya6.cn/wykj.php | https://yc.wya6.cn/wyxs.php
-茄子库,http://boluo.live | http://vip.boluo.live | http://李白.shop | https://700sjro44343.vicp.fun/vip/2505/qiezi/tv.php | https://700sjro44343.vicp.fun/vip/2505/qiezi/duo.txt
-
-
+茄子库,http://vip.boluo.live | http://boluo.live | http://李白.shop | https://700sjro44343.vicp.fun/vip/2505/qiezi/tv.php | https://700sjro44343.vicp.fun/vip/2505/qiezi/duo.txt
