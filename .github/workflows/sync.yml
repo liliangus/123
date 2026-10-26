@@ -23,7 +23,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests curl_cffi
 
-      - name: Run TVBox Helper with Deep Byte-Decoding & PHP/Kstore Ultimate Bypass
+      - name: Run TVBox Helper with Complete Localization & Jar Pipeline
         env:
           TG_TOKEN_1: ${{ secrets.TG_TOKEN_1 }}
           TG_CHAT_1: ${{ secrets.TG_CHAT_1 }}
@@ -70,7 +70,7 @@ jobs:
           except ImportError:
               HAS_CFFI = False
 
-          # 1. 深度字节解密与 JSON 清洗引擎（完美支持 HTTP 456 状态码穿透与混淆解密）
+          # 1. 深度字节解密与 JSON 清洗引擎
           def parse_tvbox_content(raw_bytes, target_url=''):
               content_candidates = []
 
@@ -164,17 +164,19 @@ jobs:
                   
               return json_data, clean_content
 
-          # 2. 独立文件下载辅助函数（支持 456 状态码放行与指纹穿透）
+          # 2. 独立文件下载辅助函数（支持相对路径拼接与 456 状态码放行）
           def download_file(url, save_path, base_url=None):
               if not url or not isinstance(url, str): return False
               if "127.0.0.1" in url or "localhost" in url: return False
+              
               if base_url and not url.startswith("http://") and not url.startswith("https://"):
                   url = urljoin(base_url, url)
+                  
               if not (url.startswith("http://") or url.startswith("https://")): return False
 
-              clean_url = url.split('?')[0] if '?' in url else url
-              urls_to_try = [clean_url, url]
-              
+              clean_download_url = url.split('?')[0] if '?' in url else url
+              urls_to_try = [clean_download_url, url]
+
               for current_url in urls_to_try:
                   try:
                       os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -184,7 +186,6 @@ jobs:
                       for ua in USER_AGENTS:
                           try:
                               res = requests.get(current_url, headers={"User-Agent": ua, "Referer": base_root + "/"}, verify=False, timeout=30)
-                              # 关键：只要有内容且包含数据，不论状态码是否为 200（如 456）均接受
                               if res.content and len(res.content) > 50:
                                   with open(save_path, 'wb') as sf:
                                       sf.write(res.content)
@@ -205,7 +206,7 @@ jobs:
                       pass
               return False
 
-          # 3. 资源本地化与 PHP 伪装后缀（?.jar）处理引擎
+          # 3. 完整资源本地化与 PHP 伪装后缀（?.jar）处理引擎
           def process_spider_and_jars(json_data, target_dir, active_target_url=None):
               if not isinstance(json_data, dict): return json_data
               lib_dir = os.path.join(target_dir, "lib")
@@ -216,24 +217,35 @@ jobs:
               if spider and isinstance(spider, str):
                   parts = spider.split(';')
                   url_or_path = parts[0].strip()
-                  if url_or_path.startswith("http://") or url_or_path.startswith("https://"):
-                      jar_basename = os.path.basename(urlparse(url_or_path).path) or "spider.jar"
-                      download_file(url_or_path, os.path.join(lib_dir, jar_basename), base_url=active_target_url)
+                  if url_or_path:
+                      full_spider_url = url_or_path
+                      if not url_or_path.startswith("http://") and not url_or_path.startswith("https://"):
+                          full_spider_url = urljoin(active_target_url, url_or_path) if active_target_url else url_or_path
+                      
+                      jar_basename = os.path.basename(urlparse(full_spider_url).path) or "spider.jar"
+                      save_jar_path = os.path.join(lib_dir, jar_basename)
+                      download_file(full_spider_url, save_jar_path, base_url=active_target_url)
+
                       if url_or_path.lower().endswith('.php') and '?.jar' not in url_or_path:
                           parts[0] = url_or_path + "?.jar"
                           json_data["spider"] = ';'.join(parts)
 
-              # 处理 sites 子源 jar（自动追加 ?.jar 伪装后缀）
+              # 处理 sites 子源 jar（自动下载到 lib 并追加 ?.jar 伪装后缀）
               sites = json_data.get("sites", [])
               for site in sites:
                   if not isinstance(site, dict): continue
                   site_jar = site.get("jar")
                   if isinstance(site_jar, str) and site_jar.strip():
-                      if site_jar.startswith("http://") or site_jar.startswith("https://"):
-                          jar_basename = os.path.basename(urlparse(site_jar).path) or "jar.jar"
-                          download_file(site_jar, os.path.join(lib_dir, jar_basename), base_url=active_target_url)
-                          if site_jar.lower().endswith('.php') and '?.jar' not in site_jar:
-                              site["jar"] = site_jar + "?.jar"
+                      full_jar_url = site_jar
+                      if not site_jar.startswith("http://") and not site_jar.startswith("https://"):
+                          full_jar_url = urljoin(active_target_url, site_jar) if active_target_url else site_jar
+                      
+                      jar_basename = os.path.basename(urlparse(full_jar_url).path) or "jar.jar"
+                      save_jar_path = os.path.join(lib_dir, jar_basename)
+                      download_file(full_jar_url, save_jar_path, base_url=active_target_url)
+
+                      if site_jar.lower().endswith('.php') and '?.jar' not in site_jar:
+                          site["jar"] = site_jar + "?.jar"
 
                   ext = site.get("ext")
                   if isinstance(ext, str) and ext.strip():
@@ -320,7 +332,6 @@ jobs:
                   for ua in USER_AGENTS:
                       try:
                           res = requests.get(url, headers={'User-Agent': ua, 'Referer': domain_referer}, timeout=30, verify=False)
-                          # 核心：允许 456 等返回状态码，只要有字节内容就尝试深度解码
                           if res.content and len(res.content) > 50:
                               try:
                                   parsed_json, _ = parse_tvbox_content(res.content, url)
@@ -370,13 +381,14 @@ jobs:
                       with open(output_path, 'w', encoding='utf-8') as f:
                           json.dump(parsed_json, f, ensure_ascii=False, indent=2)
 
+                      # 核心修复：执行完整资源本地化与 Jar/Spider 下载流程
                       local_json_data = json.loads(json.dumps(parsed_json))
                       local_json_data = process_spider_and_jars(local_json_data, target_dir, working_url)
 
                       with open(local_json_path, 'w', encoding='utf-8') as f:
                           json.dump(local_json_data, f, ensure_ascii=False, indent=2)
 
-                      jar_status_tip = ' | 📦 <b>全套本地化与PHP伪装完成</b>'
+                      jar_status_tip = ' | 📦 <b>lib文件夹与spider.jar下载同步完成</b>'
                       normalized_str = json.dumps(parsed_json, sort_keys=True, ensure_ascii=False)
                   except Exception as je:
                       jar_status_tip = f' | ❌ <b>本地化异常: {je}</b>'
@@ -427,7 +439,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes detected, skipping commit."
           else
-            git commit -m "Auto update TVBox sources with full HTTP 456 bypass and localization pipeline"
+            git commit -m "Auto update TVBox sources with complete lib and spider.jar download pipeline"
             git push
           fi
         env:
