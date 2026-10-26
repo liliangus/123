@@ -56,7 +56,6 @@ jobs:
           bj_time = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')
           state_file = '.source_state.json'
 
-          # 独立定义 User-Agent 列表和 TLS 指纹穿透支持
           USER_AGENTS = [
               'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
               'Mozilla/5.0 (Linux; Android 13; V2231A Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.43 Mobile Safari/537.36',
@@ -69,6 +68,96 @@ jobs:
               HAS_CFFI = True
           except ImportError:
               HAS_CFFI = False
+
+          # 独立内置深度字节解密与内容解析引擎，彻底解决模块属性缺失问题
+          def parse_tvbox_content(raw_bytes, target_url=''):
+              content_candidates = []
+
+              if b'IEND' in raw_bytes:
+                  try:
+                      iend_pos = raw_bytes.rfind(b'IEND')
+                      after_iend = raw_bytes[iend_pos + 8:]
+                      content_candidates.append(after_iend.decode('utf-8', errors='ignore'))
+                  except Exception:
+                      pass
+
+              try:
+                  text_preview = raw_bytes[:120].decode('utf-8', errors='ignore').strip()
+                  if text_preview.startswith('2423') or (len(text_preview) > 50 and all(c in '0123456789abcdefABCDEF' for c in text_preview[:100])):
+                      raw_bytes = bytes.fromhex(text_preview)
+              except Exception:
+                  pass
+
+              try:
+                  if raw_bytes.startswith(b'$#'):
+                      idx_end = raw_bytes.find(b'#$', 2)
+                      if idx_end != -1:
+                          raw_bytes = raw_bytes[idx_end + 2:]
+              except Exception:
+                  pass
+
+              try:
+                  content_candidates.append(raw_bytes.decode('utf-8', errors='ignore'))
+              except:
+                  pass
+                  
+              try:
+                  content_candidates.append(zlib.decompress(raw_bytes).decode('utf-8', errors='ignore'))
+              except:
+                  try:
+                      content_candidates.append(gzip.decompress(raw_bytes).decode('utf-8', errors='ignore'))
+                  except:
+                      pass
+
+              try:
+                  full_str = raw_bytes.decode('latin1', errors='ignore')
+                  b64_matches = re.findall(r'[A-Za-z0-9+/=]{30,}', full_str)
+                  for b64_str in b64_matches:
+                      try:
+                          dec = base64.b64decode(b64_str.encode('utf-8'))
+                          content_candidates.append(dec.decode('utf-8', errors='ignore'))
+                          try:
+                              content_candidates.append(zlib.decompress(dec).decode('utf-8', errors='ignore'))
+                          except:
+                              pass
+                      except:
+                          pass
+              except:
+                  pass
+
+              content_candidates.append(raw_bytes.decode('latin1', errors='ignore'))
+              combined_content = "\n".join(content_candidates)
+              
+              clean_lines = [line for line in combined_content.splitlines() if not line.strip().startswith('//') and '高抬贵手' not in line]
+              clean_content = '\n'.join(clean_lines).strip()
+
+              possible_indices = [i for i, char in enumerate(clean_content) if char in ('{', '[')]
+              json_data = None
+              
+              for idx in possible_indices:
+                  try:
+                      data, _ = json.JSONDecoder().raw_decode(clean_content, idx)
+                      if isinstance(data, (dict, list)) and len(data) > 0:
+                          if isinstance(data, dict) and any(k in data for k in ('sites', 'spider', 'lives', 'channels', 'parses')):
+                              json_data = data
+                              break
+                          elif json_data is None and isinstance(data, dict):
+                              json_data = data
+                  except Exception:
+                      continue
+
+              if json_data is None and 'sites' in clean_content:
+                  match = re.search(r'(\{[\s\S]*\}|\[[\s\S]*\])', clean_content)
+                  if match:
+                      try:
+                          json_data = json.loads(match.group(1))
+                      except Exception:
+                          pass
+
+              if json_data is None:
+                  raise ValueError("未能提取到合法的 JSON 配置对象")
+                  
+              return json_data, clean_content
 
           # 自动初始化/补充【茄子库】和【无意云】多备用地址
           default_sources_content = (
@@ -143,7 +232,7 @@ jobs:
                           res = requests.get(url, headers={'User-Agent': ua, 'Referer': domain_referer}, timeout=30, verify=False)
                           if res.content and len(res.content) > 100:
                               try:
-                                  parsed_json, _ = tvbox_helper.parse_tvbox_content(res.content, url)
+                                  parsed_json, _ = parse_tvbox_content(res.content, url)
                                   fetched_content = res.content
                                   success = True
                                   break
@@ -158,7 +247,7 @@ jobs:
                       try:
                           res = cffi_requests.get(url, impersonate="chrome120", timeout=30)
                           if res.content and len(res.content) > 100:
-                              parsed_json, _ = tvbox_helper.parse_tvbox_content(res.content, url)
+                              parsed_json, _ = parse_tvbox_content(res.content, url)
                               fetched_content = res.content
                               success = True
                       except Exception as e:
@@ -248,7 +337,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes detected, skipping commit."
           else
-            git commit -m "Auto update TVBox sources with local HAS_CFFI definition"
+            git commit -m "Auto update TVBox sources with embedded parse_tvbox_content engine"
             git push
           fi
         env:
