@@ -70,7 +70,7 @@ jobs:
           except ImportError:
               HAS_CFFI = False
 
-          # 1. 深度字节解密与 JSON 清洗引擎
+          # 1. 深度字节解密与 JSON 清洗引擎（支持 456 状态码及各种混淆负载）
           def parse_tvbox_content(raw_bytes, target_url=''):
               content_candidates = []
 
@@ -164,7 +164,7 @@ jobs:
                   
               return json_data, clean_content
 
-          # 2. 独立文件下载辅助函数（支持相对路径拼接与 456 状态码放行）
+          # 2. 独立高阶文件下载辅助函数（支持多UA、指纹穿透、456高防放行）
           def download_file(url, save_path, base_url=None):
               if not url or not isinstance(url, str): return False
               if "127.0.0.1" in url or "localhost" in url: return False
@@ -174,8 +174,8 @@ jobs:
                   
               if not (url.startswith("http://") or url.startswith("https://")): return False
 
-              clean_download_url = url.split('?')[0] if '?' in url else url
-              urls_to_try = [clean_download_url, url]
+              clean_url = url.split('?')[0] if '?' in url else url
+              urls_to_try = [clean_url, url]
 
               for current_url in urls_to_try:
                   try:
@@ -206,7 +206,7 @@ jobs:
                       pass
               return False
 
-          # 3. 完整资源本地化与 PHP 伪装后缀（?.jar）处理引擎
+          # 3. 资源本地化与 PHP 伪装后缀（?.jar）处理引擎
           def process_spider_and_jars(json_data, target_dir, active_target_url=None):
               if not isinstance(json_data, dict): return json_data
               lib_dir = os.path.join(target_dir, "lib")
@@ -268,7 +268,7 @@ jobs:
 
               return json_data
 
-          # 自动初始化 sources_list.txt
+          # 自动初始化 sources_list.txt（包含茄子库和无意云的多备用地址）
           default_sources_content = (
               "茄子库,http://boluo.live | http://vip.boluo.live | http://李白.shop | https://700sjro44343.vicp.fun/vip/2505/qiezi/tv.php | https://700sjro44343.vicp.fun/vip/2505/qiezi/duo.txt\n"
               "无意云,https://yc.wya6.cn/wykj.php | https://yc.wya6.cn/wyxs.php\n"
@@ -332,6 +332,7 @@ jobs:
                   for ua in USER_AGENTS:
                       try:
                           res = requests.get(url, headers={'User-Agent': ua, 'Referer': domain_referer}, timeout=30, verify=False)
+                          # 核心：允许 456 等返回状态码，只要有字节内容就尝试深度解码
                           if res.content and len(res.content) > 50:
                               try:
                                   parsed_json, _ = parse_tvbox_content(res.content, url)
@@ -381,7 +382,7 @@ jobs:
                       with open(output_path, 'w', encoding='utf-8') as f:
                           json.dump(parsed_json, f, ensure_ascii=False, indent=2)
 
-                      # 核心修复：执行完整资源本地化与 Jar/Spider 下载流程
+                      # 核心：完美执行与本地端一致的 spider.jar、lib 及伪装后缀本地化流水线
                       local_json_data = json.loads(json.dumps(parsed_json))
                       local_json_data = process_spider_and_jars(local_json_data, target_dir, working_url)
 
