@@ -56,6 +56,14 @@ jobs:
           bj_time = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')
           state_file = '.source_state.json'
 
+          # 独立定义 User-Agent 列表
+          USER_AGENTS = [
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+              'Mozilla/5.0 (Linux; Android 13; V2231A Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.43 Mobile Safari/537.36',
+              'TVBox/1.1.4 (Linux; Android 11)',
+              'okhttp/4.10.0'
+          ]
+
           # 自动初始化/补充【茄子库】和【无意云】多备用地址
           default_sources_content = (
               "茄子库,http://boluo.live | http://vip.boluo.live | http://李白.shop | https://700sjro44343.vicp.fun/vip/2505/qiezi/tv.php | https://700sjro44343.vicp.fun/vip/2505/qiezi/duo.txt\n"
@@ -124,7 +132,7 @@ jobs:
                   domain_root = f"{parsed_u.scheme}://{netloc_safe}"
                   domain_referer = domain_root + "/"
                   
-                  for ua in tvbox_helper.USER_AGENTS:
+                  for ua in USER_AGENTS:
                       try:
                           res = requests.get(url, headers={'User-Agent': ua, 'Referer': domain_referer}, timeout=30, verify=False)
                           if res.content and len(res.content) > 100:
@@ -204,7 +212,6 @@ jobs:
           with open('sources_list.txt', 'w', encoding='utf-8') as f:
               f.write('\n'.join(new_sources_lines) + '\n')
 
-          # 自动调用菜单 4 完成全套本地化和 PHP 伪装后缀修复
           sys.stdin = StringIO('4\n0\n')
           try:
               tvbox_helper.main()
@@ -235,7 +242,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes detected, skipping commit."
           else
-            git commit -m "Auto update TVBox sources with 456 bypass and PHP jar suffix emulation"
+            git commit -m "Auto update TVBox sources with fixed USER_AGENTS reference"
             git push
           fi
         env:
