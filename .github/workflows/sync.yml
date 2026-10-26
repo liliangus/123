@@ -49,9 +49,10 @@ jobs:
           cat << 'EOF' > run_helper.py
           import os, re, requests, time, sys, json, hashlib, shutil, base64, zlib, gzip, random
           from datetime import datetime, timezone, timedelta
-          from io import StringIO
           from urllib.parse import urljoin, urlparse
-          import tvbox_helper
+          import urllib3
+
+          urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
           bj_time = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')
           state_file = '.source_state.json'
@@ -69,7 +70,7 @@ jobs:
           except ImportError:
               HAS_CFFI = False
 
-          # 独立内置深度字节解密与内容解析引擎，彻底解决模块属性缺失问题
+          # 1. 深度字节解密与 JSON 清洗引擎（完美支持 HTTP 456 状态码穿透与混淆解密）
           def parse_tvbox_content(raw_bytes, target_url=''):
               content_candidates = []
 
@@ -128,8 +129,12 @@ jobs:
               content_candidates.append(raw_bytes.decode('latin1', errors='ignore'))
               combined_content = "\n".join(content_candidates)
               
-              clean_lines = [line for line in combined_content.splitlines() if not line.strip().startswith('//') and '高抬贵手' not in line]
-              clean_content = '\n'.join(clean_lines).strip()
+              clean_lines = []
+              for line in combined_content.splitlines():
+                  line_no_comment = re.sub(r'(?<![:])//.*', '', line)
+                  clean_lines.append(line_no_comment)
+              clean_content = '\n'.join(clean_lines)
+              clean_content = re.sub(r',\s*([\]}])', r'\1', clean_content).strip()
 
               possible_indices = [i for i, char in enumerate(clean_content) if char in ('{', '[')]
               json_data = None
@@ -159,7 +164,99 @@ jobs:
                   
               return json_data, clean_content
 
-          # 自动初始化/补充【茄子库】和【无意云】多备用地址
+          # 2. 独立文件下载辅助函数（支持 456 状态码放行与指纹穿透）
+          def download_file(url, save_path, base_url=None):
+              if not url or not isinstance(url, str): return False
+              if "127.0.0.1" in url or "localhost" in url: return False
+              if base_url and not url.startswith("http://") and not url.startswith("https://"):
+                  url = urljoin(base_url, url)
+              if not (url.startswith("http://") or url.startswith("https://")): return False
+
+              clean_url = url.split('?')[0] if '?' in url else url
+              urls_to_try = [clean_url, url]
+              
+              for current_url in urls_to_try:
+                  try:
+                      os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                      parsed_url = urlparse(current_url)
+                      base_root = f"{parsed_url.scheme}://{parsed_url.netloc}"
+                      
+                      for ua in USER_AGENTS:
+                          try:
+                              res = requests.get(current_url, headers={"User-Agent": ua, "Referer": base_root + "/"}, verify=False, timeout=30)
+                              # 关键：只要有内容且包含数据，不论状态码是否为 200（如 456）均接受
+                              if res.content and len(res.content) > 50:
+                                  with open(save_path, 'wb') as sf:
+                                      sf.write(res.content)
+                                  return True
+                          except Exception:
+                              continue
+                              
+                      if HAS_CFFI:
+                          try:
+                              res = cffi_requests.get(current_url, impersonate="chrome120", timeout=30)
+                              if res.content and len(res.content) > 50:
+                                  with open(save_path, 'wb') as sf:
+                                      sf.write(res.content)
+                                  return True
+                          except Exception:
+                              pass
+                  except Exception:
+                      pass
+              return False
+
+          # 3. 资源本地化与 PHP 伪装后缀（?.jar）处理引擎
+          def process_spider_and_jars(json_data, target_dir, active_target_url=None):
+              if not isinstance(json_data, dict): return json_data
+              lib_dir = os.path.join(target_dir, "lib")
+              os.makedirs(lib_dir, exist_ok=True)
+
+              # 处理全局 spider
+              spider = json_data.get("spider", "")
+              if spider and isinstance(spider, str):
+                  parts = spider.split(';')
+                  url_or_path = parts[0].strip()
+                  if url_or_path.startswith("http://") or url_or_path.startswith("https://"):
+                      jar_basename = os.path.basename(urlparse(url_or_path).path) or "spider.jar"
+                      download_file(url_or_path, os.path.join(lib_dir, jar_basename), base_url=active_target_url)
+                      if url_or_path.lower().endswith('.php') and '?.jar' not in url_or_path:
+                          parts[0] = url_or_path + "?.jar"
+                          json_data["spider"] = ';'.join(parts)
+
+              # 处理 sites 子源 jar（自动追加 ?.jar 伪装后缀）
+              sites = json_data.get("sites", [])
+              for site in sites:
+                  if not isinstance(site, dict): continue
+                  site_jar = site.get("jar")
+                  if isinstance(site_jar, str) and site_jar.strip():
+                      if site_jar.startswith("http://") or site_jar.startswith("https://"):
+                          jar_basename = os.path.basename(urlparse(site_jar).path) or "jar.jar"
+                          download_file(site_jar, os.path.join(lib_dir, jar_basename), base_url=active_target_url)
+                          if site_jar.lower().endswith('.php') and '?.jar' not in site_jar:
+                              site["jar"] = site_jar + "?.jar"
+
+                  ext = site.get("ext")
+                  if isinstance(ext, str) and ext.strip():
+                      if (ext.startswith("http://") or ext.startswith("https://")) and not any(k in ext for k in ['22776', 'api', 'server']):
+                          filename = os.path.basename(ext.split('?')[0]) or "ext.json"
+                          save_path = os.path.join(lib_dir, filename)
+                          if download_file(ext, save_path, base_url=active_target_url):
+                              site["ext"] = f"./lib/{filename}"
+
+              # 处理 lives 直播源
+              lives = json_data.get("lives", [])
+              for live in lives:
+                  if not isinstance(live, dict): continue
+                  url = live.get("url", "")
+                  if isinstance(url, str) and url.strip() and (url.startswith("http://") or url.startswith("https://")):
+                      filename = os.path.basename(url.split('?')[0]) or "live.m3u"
+                      save_path = os.path.join(target_dir, "live", filename)
+                      if download_file(url, save_path, base_url=active_target_url):
+                          live["url"] = f"./live/{filename}"
+
+              return json_data
+
+          # 自动初始化 sources_list.txt
           default_sources_content = (
               "茄子库,http://boluo.live | http://vip.boluo.live | http://李白.shop | https://700sjro44343.vicp.fun/vip/2505/qiezi/tv.php | https://700sjro44343.vicp.fun/vip/2505/qiezi/duo.txt\n"
               "无意云,https://yc.wya6.cn/wykj.php | https://yc.wya6.cn/wyxs.php\n"
@@ -200,7 +297,6 @@ jobs:
               parts = line.split(',', 1)
               name = parts[0].strip() if len(parts) > 1 else f'源{idx}'
               url_part = parts[1] if len(parts) > 1 else line
-              
               urls = [u.strip() for u in re.split(r'[|\s]+', url_part) if u.strip().startswith('http')]
               
               if not urls:
@@ -219,18 +315,13 @@ jobs:
                   last_err = ''
                   
                   parsed_u = urlparse(url)
-                  netloc_safe = parsed_u.netloc
-                  try:
-                      netloc_safe = parsed_u.netloc.encode('idna').decode('ascii')
-                  except Exception:
-                      pass
-                  domain_root = f"{parsed_u.scheme}://{netloc_safe}"
-                  domain_referer = domain_root + "/"
+                  domain_referer = f"{parsed_u.scheme}://{parsed_u.netloc}/"
                   
                   for ua in USER_AGENTS:
                       try:
                           res = requests.get(url, headers={'User-Agent': ua, 'Referer': domain_referer}, timeout=30, verify=False)
-                          if res.content and len(res.content) > 100:
+                          # 核心：允许 456 等返回状态码，只要有字节内容就尝试深度解码
+                          if res.content and len(res.content) > 50:
                               try:
                                   parsed_json, _ = parse_tvbox_content(res.content, url)
                                   fetched_content = res.content
@@ -246,7 +337,7 @@ jobs:
                   if not success and HAS_CFFI:
                       try:
                           res = cffi_requests.get(url, impersonate="chrome120", timeout=30)
-                          if res.content and len(res.content) > 100:
+                          if res.content and len(res.content) > 50:
                               parsed_json, _ = parse_tvbox_content(res.content, url)
                               fetched_content = res.content
                               success = True
@@ -266,24 +357,29 @@ jobs:
               else:
                   jar_status_tip = ''
                   try:
-                      if isinstance(parsed_json, dict):
-                          spider_val = parsed_json.get('spider', '')
-                          base_jar_name = None
-                          if spider_val:
-                              spider_path_part = spider_val.split(';')[0].strip()
-                              lower_part = spider_path_part.lower()
-                              if not any(lower_part.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp']):
-                                  base_jar_name = os.path.basename(spider_path_part) if lower_part.endswith('.jar') or '.' in spider_path_part else 'spider.jar'
+                      target_dir = os.path.join("./sources_files", name)
+                      os.makedirs(target_dir, exist_ok=True)
+                      
+                      api_path = os.path.join(target_dir, "api.json")
+                      output_path = os.path.join(target_dir, "api_改.json")
+                      local_json_path = os.path.join(target_dir, "api_本地版.json")
 
-                          if base_jar_name:
-                              local_rel_path = f"sources_files/{name}/{base_jar_name}"
-                              if os.path.exists(local_rel_path) and os.path.getsize(local_rel_path) > 1024:
-                                  jar_status_tip = f' | 📦 <b>{base_jar_name} 已存在</b>'
-                              else:
-                                  jar_status_tip = f' | 📦 <b>jar同步完成</b>'
+                      with open(api_path, 'wb') as f:
+                          f.write(fetched_content)
 
+                      with open(output_path, 'w', encoding='utf-8') as f:
+                          json.dump(parsed_json, f, ensure_ascii=False, indent=2)
+
+                      local_json_data = json.loads(json.dumps(parsed_json))
+                      local_json_data = process_spider_and_jars(local_json_data, target_dir, working_url)
+
+                      with open(local_json_path, 'w', encoding='utf-8') as f:
+                          json.dump(local_json_data, f, ensure_ascii=False, indent=2)
+
+                      jar_status_tip = ' | 📦 <b>全套本地化与PHP伪装完成</b>'
                       normalized_str = json.dumps(parsed_json, sort_keys=True, ensure_ascii=False)
-                  except Exception:
+                  except Exception as je:
+                      jar_status_tip = f' | ❌ <b>本地化异常: {je}</b>'
                       normalized_str = re.sub(r'\s+', '', fetched_content.decode('utf-8', errors='ignore'))
 
                   content_hash = hashlib.md5(normalized_str.encode('utf-8')).hexdigest()
@@ -306,12 +402,6 @@ jobs:
 
           with open('sources_list.txt', 'w', encoding='utf-8') as f:
               f.write('\n'.join(new_sources_lines) + '\n')
-
-          sys.stdin = StringIO('4\n0\n')
-          try:
-              tvbox_helper.main()
-          except SystemExit:
-              pass
 
           details_text = '\n\n'.join(source_results)
           message = f'<b>📊 TVBox 智能备用源独立监控报告</b>\n\n{details_text}'
@@ -337,7 +427,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes detected, skipping commit."
           else
-            git commit -m "Auto update TVBox sources with embedded parse_tvbox_content engine"
+            git commit -m "Auto update TVBox sources with full HTTP 456 bypass and localization pipeline"
             git push
           fi
         env:
