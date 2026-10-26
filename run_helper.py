@@ -7,6 +7,22 @@ import tvbox_helper
 bj_time = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')
 state_file = '.source_state.json'
 
+# 确保默认配置包含【茄子库】和【无意云】
+default_sources_content = (
+    "茄子库,http://boluo.live | http://vip.boluo.live | http://李白.shop | https://700sjro44343.vicp.fun/vip/2505/qiezi/tv.php | https://700sjro44343.vicp.fun/vip/2505/qiezi/duo.txt\n"
+    "无意云,https://yc.wya6.cn/wykj.php | https://yc.wya6.cn/wyxs.php\n"
+)
+
+if not os.path.exists('sources_list.txt'):
+    with open('sources_list.txt', 'w', encoding='utf-8') as f:
+        f.write(default_sources_content)
+else:
+    with open('sources_list.txt', 'r', encoding='utf-8') as f:
+        existing_content = f.read()
+    if "茄子库" not in existing_content and "无意云" not in existing_content:
+        with open('sources_list.txt', 'a', encoding='utf-8') as f:
+            f.write("\n" + default_sources_content)
+
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Linux; Android 13; V2231A Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.43 Mobile Safari/537.36',
@@ -18,7 +34,6 @@ USER_AGENTS = [
 def parse_tvbox_content(raw_bytes, target_url=''):
     content_candidates = []
 
-    # 0. 尝试提取 PNG 隐写尾椎 (针对防盗链图片包裹JSON的情况)
     if b'IEND' in raw_bytes:
         try:
             iend_pos = raw_bytes.rfind(b'IEND')
@@ -27,7 +42,6 @@ def parse_tvbox_content(raw_bytes, target_url=''):
         except Exception:
             pass
 
-    # 1. 尝试 Hex 十六进制转二进制
     try:
         text_preview = raw_bytes[:120].decode('utf-8', errors='ignore').strip()
         if text_preview.startswith('2423') or (len(text_preview) > 50 and all(c in '0123456789abcdefABCDEF' for c in text_preview[:100])):
@@ -35,7 +49,6 @@ def parse_tvbox_content(raw_bytes, target_url=''):
     except Exception:
         pass
 
-    # 2. 剥离 $# 魔术头
     try:
         if raw_bytes.startswith(b'$#'):
             idx_end = raw_bytes.find(b'#$', 2)
@@ -44,7 +57,6 @@ def parse_tvbox_content(raw_bytes, target_url=''):
     except Exception:
         pass
 
-    # 3. 多路解压与解码尝试
     try:
         content_candidates.append(raw_bytes.decode('utf-8', errors='ignore'))
     except:
@@ -58,7 +70,6 @@ def parse_tvbox_content(raw_bytes, target_url=''):
         except:
             pass
 
-    # 4. 暴力搜索整个文件中的所有长 Base64 片段并尝试解码
     try:
         full_str = raw_bytes.decode('latin1', errors='ignore')
         b64_matches = re.findall(r'[A-Za-z0-9+/=]{30,}', full_str)
@@ -78,11 +89,9 @@ def parse_tvbox_content(raw_bytes, target_url=''):
     content_candidates.append(raw_bytes.decode('latin1', errors='ignore'))
     combined_content = "\n".join(content_candidates)
     
-    # 清理注释行及反爬干扰文本
     clean_lines = [line for line in combined_content.splitlines() if not line.strip().startswith('//') and '高抬贵手' not in line]
     clean_content = '\n'.join(clean_lines).strip()
 
-    # 5. 全局遍历所有 '{' 或 '[' 位置，利用 raw_decode 寻找合法的 TVBox 配置
     possible_indices = [i for i, char in enumerate(clean_content) if char in ('{', '[')]
     json_data = None
     
@@ -214,7 +223,6 @@ for idx, line in enumerate(sources_raw, 1):
                         if res_orig.content:
                             res = res_orig
                     
-                    # 任意状态码穿透（完美解决 PHP 456 错误码无法抓取的问题）
                     try:
                         parsed_json, raw_text = parse_tvbox_content(res.content, url)
                         fetched_content = res.content
@@ -366,6 +374,7 @@ with open(state_file, 'w', encoding='utf-8') as f:
 with open('sources_list.txt', 'w', encoding='utf-8') as f:
     f.write('\n'.join(new_sources_lines) + '\n')
 
+# 自动模拟菜单 4 执行全量源更新与本地化处理
 sys.stdin = StringIO('4\n0\n')
 try:
     tvbox_helper.main()
