@@ -1,447 +1,511 @@
-name: TVBox Helper Auto Run
+import os
+import base64
+import json
+import re
+import requests
+import zlib
+import gzip
+import urllib.parse
+import urllib3
+import shutil
+import random
 
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 0,12 * * *'
+# 禁用urllib3的HTTPS证书警告
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-jobs:
-  run-script:
-    runs-on: ubuntu-latest
+# 尝试导入高阶 TLS 指纹模拟库
+try:
+    from curl_cffi import requests as cffi_requests
+    HAS_CFFI = True
+except ImportError:
+    HAS_CFFI = False
+
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Linux; Android 13; V2231A Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.43 Mobile Safari/537.36',
+    'TVBox/1.1.4 (Linux; Android 11)',
+    'okhttp/4.10.0'
+]
+
+def select_or_input_folder(require_api_converted=False):
+    sources_base = "./sources_files"
+    os.makedirs(sources_base, exist_ok=True)
     
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+    folders = []
+    for f in os.listdir(sources_base):
+        f_path = os.path.join(sources_base, f)
+        if os.path.isdir(f_path):
+            if require_api_converted:
+                if os.path.exists(os.path.join(f_path, "api_改.json")):
+                    folders.append(f)
+            else:
+                folders.append(f)
+                
+    if folders:
+        print("\n📁 可用的分类文件夹:")
+        for idx, f in enumerate(folders, 1):
+            print(f"  [{idx}] {f}")
+        print(f"  [0] 手动输入新文件夹名称")
+        print(f"  [b] 返回上级菜单")
+        
+        choice = input("请选择编号、输入 0 或按 b 返回: ").strip().lower()
+        if choice == 'b':
+            return None
+        if choice.isdigit() and 1 <= int(choice) <= len(folders):
+            selected = folders[int(choice) - 1]
+            print(f"-> 已选择文件夹: {selected}")
+            return selected
+    else:
+        print(f"  [b] 返回上级菜单")
+            
+    folder_name = input("请输入分类文件夹名称 (输入 b 返回): ").strip()
+    if folder_name.lower() == 'b':
+        return None
+    return folder_name if folder_name else "default_sources"
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+# 深度字节解密与 JSON 清洗引擎（完美支持 HTTP 456 状态码及各种混淆负载）
+def parse_tvbox_content(raw_bytes, target_url=''):
+    content_candidates = []
 
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests curl_cffi
+    if b'IEND' in raw_bytes:
+        try:
+            iend_pos = raw_bytes.rfind(b'IEND')
+            after_iend = raw_bytes[iend_pos + 8:]
+            content_candidates.append(after_iend.decode('utf-8', errors='ignore'))
+        except Exception:
+            pass
 
-      - name: Run TVBox Helper with Complete Localization & Jar Pipeline
-        env:
-          TG_TOKEN_1: ${{ secrets.TG_TOKEN_1 }}
-          TG_CHAT_1: ${{ secrets.TG_CHAT_1 }}
-          TG_TOKEN_2: ${{ secrets.TG_TOKEN_2 }}
-          TG_CHAT_2: ${{ secrets.TG_CHAT_2 }}
-          TG_TOKEN_3: ${{ secrets.TG_TOKEN_3 }}
-          TG_CHAT_3: ${{ secrets.TG_CHAT_3 }}
-          TG_TOKEN_4: ${{ secrets.TG_TOKEN_4 }}
-          TG_CHAT_4: ${{ secrets.TG_CHAT_4 }}
-          TG_TOKEN_5: ${{ secrets.TG_TOKEN_5 }}
-          TG_CHAT_5: ${{ secrets.TG_CHAT_5 }}
-          TG_TOKEN_6: ${{ secrets.TG_TOKEN_6 }}
-          TG_CHAT_6: ${{ secrets.TG_CHAT_6 }}
-          TG_TOKEN_7: ${{ secrets.TG_TOKEN_7 }}
-          TG_CHAT_7: ${{ secrets.TG_CHAT_7 }}
-          TG_TOKEN_8: ${{ secrets.TG_TOKEN_8 }}
-          TG_CHAT_8: ${{ secrets.TG_CHAT_8 }}
-          TG_TOKEN_9: ${{ secrets.TG_TOKEN_9 }}
-          TG_CHAT_9: ${{ secrets.TG_CHAT_9 }}
-          TG_TOKEN_10: ${{ secrets.TG_TOKEN_10 }}
-          TG_CHAT_10: ${{ secrets.TG_CHAT_10 }}
-        run: |
-          cat << 'EOF' > run_helper.py
-          import os, re, requests, time, sys, json, hashlib, shutil, base64, zlib, gzip, random
-          from datetime import datetime, timezone, timedelta
-          from urllib.parse import urljoin, urlparse
-          import urllib3
+    try:
+        text_preview = raw_bytes[:120].decode('utf-8', errors='ignore').strip()
+        if text_preview.startswith('2423') or (len(text_preview) > 50 and all(c in '0123456789abcdefABCDEF' for c in text_preview[:100])):
+            raw_bytes = bytes.fromhex(text_preview)
+    except Exception:
+        pass
 
-          urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    try:
+        if raw_bytes.startswith(b'$#'):
+            idx_end = raw_bytes.find(b'#$', 2)
+            if idx_end != -1:
+                raw_bytes = raw_bytes[idx_end + 2:]
+    except Exception:
+        pass
 
-          bj_time = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')
-          state_file = '.source_state.json'
+    try:
+        content_candidates.append(raw_bytes.decode('utf-8', errors='ignore'))
+    except:
+        pass
+        
+    try:
+        content_candidates.append(zlib.decompress(raw_bytes).decode('utf-8', errors='ignore'))
+    except:
+        try:
+            content_candidates.append(gzip.decompress(raw_bytes).decode('utf-8', errors='ignore'))
+        except:
+            pass
 
-          USER_AGENTS = [
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-              'Mozilla/5.0 (Linux; Android 13; V2231A Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.43 Mobile Safari/537.36',
-              'TVBox/1.1.4 (Linux; Android 11)',
-              'okhttp/4.10.0'
-          ]
+    try:
+        full_str = raw_bytes.decode('latin1', errors='ignore')
+        b64_matches = re.findall(r'[A-Za-z0-9+/=]{30,}', full_str)
+        for b64_str in b64_matches:
+            try:
+                dec = base64.b64decode(b64_str.encode('utf-8'))
+                content_candidates.append(dec.decode('utf-8', errors='ignore'))
+                try:
+                    content_candidates.append(zlib.decompress(dec).decode('utf-8', errors='ignore'))
+                except:
+                    pass
+            except:
+                pass
+    except:
+        pass
 
-          try:
-              from curl_cffi import requests as cffi_requests
-              HAS_CFFI = True
-          except ImportError:
-              HAS_CFFI = False
+    content_candidates.append(raw_bytes.decode('latin1', errors='ignore'))
+    combined_content = "\n".join(content_candidates)
+    
+    clean_lines = []
+    for line in combined_content.splitlines():
+        line_no_comment = re.sub(r'(?<![:])//.*', '', line)
+        clean_lines.append(line_no_comment)
+    clean_content = '\n'.join(clean_lines)
+    clean_content = re.sub(r',\s*([\]}])', r'\1', clean_content).strip()
 
-          # 1. 深度字节解密与 JSON 清洗引擎（支持 456 状态码及各种混淆负载）
-          def parse_tvbox_content(raw_bytes, target_url=''):
-              content_candidates = []
+    possible_indices = [i for i, char in enumerate(clean_content) if char in ('{', '[')]
+    json_data = None
+    
+    for idx in possible_indices:
+        try:
+            data, _ = json.JSONDecoder().raw_decode(clean_content, idx)
+            if isinstance(data, (dict, list)) and len(data) > 0:
+                if isinstance(data, dict) and any(k in data for k in ('sites', 'spider', 'lives', 'channels', 'parses')):
+                    json_data = data
+                    break
+                elif json_data is None and isinstance(data, dict):
+                    json_data = data
+        except Exception:
+            continue
 
-              if b'IEND' in raw_bytes:
-                  try:
-                      iend_pos = raw_bytes.rfind(b'IEND')
-                      after_iend = raw_bytes[iend_pos + 8:]
-                      content_candidates.append(after_iend.decode('utf-8', errors='ignore'))
-                  except Exception:
-                      pass
+    if json_data is None and 'sites' in clean_content:
+        match = re.search(r'(\{[\s\S]*\}|\[[\s\S]*\])', clean_content)
+        if match:
+            try:
+                json_data = json.loads(match.group(1))
+            except Exception:
+                pass
 
-              try:
-                  text_preview = raw_bytes[:120].decode('utf-8', errors='ignore').strip()
-                  if text_preview.startswith('2423') or (len(text_preview) > 50 and all(c in '0123456789abcdefABCDEF' for c in text_preview[:100])):
-                      raw_bytes = bytes.fromhex(text_preview)
-              except Exception:
-                  pass
+    if json_data is None:
+        raise ValueError("未能提取到合法的 JSON 配置对象")
+        
+    return json_data, clean_content
 
-              try:
-                  if raw_bytes.startswith(b'$#'):
-                      idx_end = raw_bytes.find(b'#$', 2)
-                      if idx_end != -1:
-                          raw_bytes = raw_bytes[idx_end + 2:]
-              except Exception:
-                  pass
+def download_file(url, save_path, base_url=None):
+    if not url or not isinstance(url, str):
+        return False
+    if "127.0.0.1" in url or "localhost" in url:
+        return False
+    
+    if base_url and not url.startswith("http://") and not url.startswith("https://"):
+        url = urllib.parse.urljoin(base_url, url)
+        
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return False
 
-              try:
-                  content_candidates.append(raw_bytes.decode('utf-8', errors='ignore'))
-              except:
-                  pass
-                  
-              try:
-                  content_candidates.append(zlib.decompress(raw_bytes).decode('utf-8', errors='ignore'))
-              except:
-                  try:
-                      content_candidates.append(gzip.decompress(raw_bytes).decode('utf-8', errors='ignore'))
-                  except:
-                      pass
+    clean_download_url = url.split('?')[0] if '?' in url else url
+    urls_to_try = [clean_download_url, url]
+    if "https://" in clean_download_url and any(k in clean_download_url for k in ['vicp.fun', 'cpolar', 'natapp', 'f3322', 'ticp']):
+        urls_to_try.insert(0, clean_download_url.replace("https://", "http://"))
 
-              try:
-                  full_str = raw_bytes.decode('latin1', errors='ignore')
-                  b64_matches = re.findall(r'[A-Za-z0-9+/=]{30,}', full_str)
-                  for b64_str in b64_matches:
-                      try:
-                          dec = base64.b64decode(b64_str.encode('utf-8'))
-                          content_candidates.append(dec.decode('utf-8', errors='ignore'))
-                          try:
-                              content_candidates.append(zlib.decompress(dec).decode('utf-8', errors='ignore'))
-                          except:
-                              pass
-                      except:
-                          pass
-              except:
-                  pass
+    for current_url in urls_to_try:
+        try:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            print(f"📥 正在下载资源: {current_url}")
+            
+            parsed_url = urllib.parse.urlparse(current_url)
+            base_root = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            
+            for ua in USER_AGENTS:
+                try:
+                    res = requests.get(current_url, headers={"User-Agent": ua, "Referer": base_root + "/"}, verify=False, timeout=30)
+                    # 允许 200 或由于高防/456 返回但带有有效内容的数据
+                    if res.content and len(res.content) > 50:
+                        with open(save_path, 'wb') as sf:
+                            sf.write(res.content)
+                        print(f"  -> ✅ 保存成功 -> {save_path}")
+                        return True
+                except Exception:
+                    continue
+                    
+            if HAS_CFFI:
+                try:
+                    res = cffi_requests.get(current_url, impersonate="chrome120", timeout=30)
+                    if res.content and len(res.content) > 50:
+                        with open(save_path, 'wb') as sf:
+                            sf.write(res.content)
+                        print(f"  -> ✅ 通过 TLS 指纹穿透保存成功 -> {save_path}")
+                        return True
+                except Exception:
+                    pass
+                    
+        except Exception as e:
+            print(f"  -> ❌ 下载异常 [{current_url}]: {e}")
+            
+    return False
 
-              content_candidates.append(raw_bytes.decode('latin1', errors='ignore'))
-              combined_content = "\n".join(content_candidates)
-              
-              clean_lines = []
-              for line in combined_content.splitlines():
-                  line_no_comment = re.sub(r'(?<![:])//.*', '', line)
-                  clean_lines.append(line_no_comment)
-              clean_content = '\n'.join(clean_lines)
-              clean_content = re.sub(r',\s*([\]}])', r'\1', clean_content).strip()
+def clean_json_string(content_str):
+    cleaned_lines = []
+    for line in content_str.splitlines():
+        line_no_comment = re.sub(r'(?<![:])//.*', '', line)
+        cleaned_lines.append(line_no_comment)
+    text = '\n'.join(cleaned_lines)
+    text = re.sub(r',\s*([\]}])', r'\1', text)
+    return text
 
-              possible_indices = [i for i, char in enumerate(clean_content) if char in ('{', '[')]
-              json_data = None
-              
-              for idx in possible_indices:
-                  try:
-                      data, _ = json.JSONDecoder().raw_decode(clean_content, idx)
-                      if isinstance(data, (dict, list)) and len(data) > 0:
-                          if isinstance(data, dict) and any(k in data for k in ('sites', 'spider', 'lives', 'channels', 'parses')):
-                              json_data = data
-                              break
-                          elif json_data is None and isinstance(data, dict):
-                              json_data = data
-                  except Exception:
-                      continue
+def process_spider_and_jars(json_data, target_dir, active_target_url=None):
+    if not isinstance(json_data, dict):
+        return json_data
 
-              if json_data is None and 'sites' in clean_content:
-                  match = re.search(r'(\{[\s\S]*\}|\[[\s\S]*\])', clean_content)
-                  if match:
-                      try:
-                          json_data = json.loads(match.group(1))
-                      except Exception:
-                          pass
+    lib_dir = os.path.join(target_dir, "lib")
+    os.makedirs(lib_dir, exist_ok=True)
 
-              if json_data is None:
-                  raise ValueError("未能提取到合法的 JSON 配置对象")
-                  
-              return json_data, clean_content
+    # 1. 处理全局 spider：自动下载到 lib 并对 php 后端追加 ?.jar 伪装后缀
+    spider = json_data.get("spider", "")
+    print(f"\n  -> 🔍 [蜘蛛包诊断] 原始 spider 配置: {spider}")
+    
+    if spider and isinstance(spider, str):
+        parts = spider.split(';')
+        url_or_path = parts[0].strip()
+        
+        if url_or_path:
+            full_spider_url = url_or_path
+            if not url_or_path.startswith("http://") and not url_or_path.startswith("https://"):
+                full_spider_url = urljoin(active_target_url, url_or_path) if active_target_url else url_or_path
+            
+            jar_basename = os.path.basename(urlparse(full_spider_url).path) or "spider.jar"
+            save_jar_path = os.path.join(lib_dir, jar_basename)
+            download_file(full_spider_url, save_jar_path, base_url=active_target_url)
+            
+            if url_or_path.lower().endswith('.php') and '?.jar' not in url_or_path:
+                parts[0] = url_or_path + "?.jar"
+                json_data["spider"] = ';'.join(parts)
+                print(f"  -> 🔧 [兼容修复] 全局 spider 已追加伪装后缀: {json_data['spider']}")
 
-          # 2. 独立高阶文件下载辅助函数（支持多UA、指纹穿透、456高防放行）
-          def download_file(url, save_path, base_url=None):
-              if not url or not isinstance(url, str): return False
-              if "127.0.0.1" in url or "localhost" in url: return False
-              
-              if base_url and not url.startswith("http://") and not url.startswith("https://"):
-                  url = urljoin(base_url, url)
-                  
-              if not (url.startswith("http://") or url.startswith("https://")): return False
+    # 2. 遍历处理 sites 中的每个源：下载子源 Jar 并追加 ?.jar 伪装后缀
+    sites = json_data.get("sites", [])
+    print(f"  -> 📂 正在检测各子源(sites)配置（共 {len(sites)} 个源）...")
+    
+    for idx, site in enumerate(sites):
+        if not isinstance(site, dict):
+            continue
+            
+        site_name = site.get("name", f"site_{idx}")
+        
+        site_jar = site.get("jar")
+        if isinstance(site_jar, str) and site_jar.strip():
+            full_jar_url = site_jar
+            if not site_jar.startswith("http://") and not site_jar.startswith("https://"):
+                full_jar_url = urljoin(active_target_url, site_jar) if active_target_url else site_jar
+            
+            jar_basename = os.path.basename(urlparse(full_jar_url).path) or f"jar_{idx}.jar"
+            save_jar_path = os.path.join(lib_dir, jar_basename)
+            download_file(full_jar_url, save_jar_path, base_url=active_target_url)
+            
+            if site_jar.lower().endswith('.php') and '?.jar' not in site_jar:
+                site["jar"] = site_jar + "?.jar"
+                print(f"  -> 🔧 [兼容修复] 子源 [{site_name}] 的 Jar 已追加伪装后缀: {site['jar']}")
 
-              clean_url = url.split('?')[0] if '?' in url else url
-              urls_to_try = [clean_url, url]
+        # 处理站点级 ext
+        ext = site.get("ext")
+        if isinstance(ext, str) and ext.strip():
+            if (ext.startswith("http://") or ext.startswith("https://")) and not any(k in ext for k in ['22776', 'api', 'server']):
+                filename = os.path.basename(ext.split('?')[0]) or f"ext_{idx}.json"
+                save_path = os.path.join(lib_dir, filename)
+                if download_file(ext, save_path, base_url=active_target_url):
+                    site["ext"] = f"./lib/{filename}"
+        elif isinstance(ext, dict):
+            for k, v in ext.items():
+                if isinstance(v, str) and v.strip() and (v.startswith("http://") or v.startswith("https://")):
+                    if not any(sub in v for sub in ['22776', 'api', 'server']):
+                        filename = os.path.basename(v.split('?')[0]) or f"{k}_{idx}.txt"
+                        save_path = os.path.join(lib_dir, filename)
+                        if download_file(v, save_path, base_url=active_target_url):
+                            ext[k] = f"./lib/{filename}"
+                elif isinstance(v, list):
+                    new_list = []
+                    for item in v:
+                        if isinstance(item, str) and item.strip() and (item.startswith("http://") or item.startswith("https://")):
+                            if not any(sub in item for sub in ['22776', 'api', 'server']):
+                                filename = os.path.basename(item.split('?')[0]) or f"{k}_item.txt"
+                                save_path = os.path.join(lib_dir, filename)
+                                if download_file(item, save_path, base_url=active_target_url):
+                                    new_list.append(f"./lib/{filename}")
+                                    continue
+                        new_list.append(item)
+                    ext[k] = new_list
 
-              for current_url in urls_to_try:
-                  try:
-                      os.makedirs(os.path.dirname(save_path), exist_ok=True)
-                      parsed_url = urlparse(current_url)
-                      base_root = f"{parsed_url.scheme}://{parsed_url.netloc}"
-                      
-                      for ua in USER_AGENTS:
-                          try:
-                              res = requests.get(current_url, headers={"User-Agent": ua, "Referer": base_root + "/"}, verify=False, timeout=30)
-                              if res.content and len(res.content) > 50:
-                                  with open(save_path, 'wb') as sf:
-                                      sf.write(res.content)
-                                  return True
-                          except Exception:
-                              continue
-                              
-                      if HAS_CFFI:
-                          try:
-                              res = cffi_requests.get(current_url, impersonate="chrome120", timeout=30)
-                              if res.content and len(res.content) > 50:
-                                  with open(save_path, 'wb') as sf:
-                                      sf.write(res.content)
-                                  return True
-                          except Exception:
-                              pass
-                  except Exception:
-                      pass
-              return False
+    # 3. 处理 lives 直播源
+    lives = json_data.get("lives", [])
+    print(f"  -> 📡 正在检测并下载直播源(lives)...")
+    for live in lives:
+        if not isinstance(live, dict):
+            continue
+        url = live.get("url", "")
+        if isinstance(url, str) and url.strip() and (url.startswith("http://") or url.startswith("https://")):
+            filename = os.path.basename(url.split('?')[0])
+            if not filename or '.' not in filename: 
+                filename = "live.m3u"
+            save_path = os.path.join(target_dir, "live", filename)
+            if download_file(url, save_path, base_url=active_target_url):
+                live["url"] = f"./live/{filename}"
 
-          # 3. 资源本地化与 PHP 伪装后缀（?.jar）处理引擎
-          def process_spider_and_jars(json_data, target_dir, active_target_url=None):
-              if not isinstance(json_data, dict): return json_data
-              lib_dir = os.path.join(target_dir, "lib")
-              os.makedirs(lib_dir, exist_ok=True)
+    return json_data
 
-              # 处理全局 spider
-              spider = json_data.get("spider", "")
-              if spider and isinstance(spider, str):
-                  parts = spider.split(';')
-                  url_or_path = parts[0].strip()
-                  if url_or_path:
-                      full_spider_url = url_or_path
-                      if not url_or_path.startswith("http://") and not url_or_path.startswith("https://"):
-                          full_spider_url = urljoin(active_target_url, url_or_path) if active_target_url else url_or_path
-                      
-                      jar_basename = os.path.basename(urlparse(full_spider_url).path) or "spider.jar"
-                      save_jar_path = os.path.join(lib_dir, jar_basename)
-                      download_file(full_spider_url, save_jar_path, base_url=active_target_url)
+def process_single_task(folder_name, url_input):
+    target_dir = os.path.join("./sources_files", folder_name)
+    os.makedirs(target_dir, exist_ok=True)
+    
+    api_path = os.path.join(target_dir, "api.json")
+    output_path = os.path.join(target_dir, "api_改.json")
+    local_json_path = os.path.join(target_dir, "api_本地版.json")
+    
+    urls = [u.strip() for u in url_input.split('|') if u.strip()]
+    if not urls:
+        print(f"❌ 错误：【{folder_name}】未提供有效的订阅链接！")
+        return False
 
-                      if url_or_path.lower().endswith('.php') and '?.jar' not in url_or_path:
-                          parts[0] = url_or_path + "?.jar"
-                          json_data["spider"] = ';'.join(parts)
+    print(f"\n📁 目标目录: {target_dir}")
+    success_download = False
+    active_target_url = urls[0]
+    fetched_content = None
+    
+    for idx, target_url in enumerate(urls, 1):
+        active_target_url = target_url
+        parsed_u = urlparse(target_url)
+        domain_referer = f"{parsed_u.scheme}://{parsed_u.netloc}/"
+        
+        for ua in USER_AGENTS:
+            try:
+                print(f"正在尝试请求第 {idx} 个地址 ({target_url}) ...")
+                response = requests.get(target_url, headers={"User-Agent": ua, "Referer": domain_referer}, verify=False, timeout=25)
+                if response.content and len(response.content) > 50:
+                    try:
+                        parse_tvbox_content(response.content, target_url)
+                        fetched_content = response.content
+                        success_download = True
+                        print(f"  -> ✅ 成功下载至: {api_path}")
+                        break
+                    except Exception:
+                        pass
+            except Exception:
+                continue
 
-              # 处理 sites 子源 jar（自动下载到 lib 并追加 ?.jar 伪装后缀）
-              sites = json_data.get("sites", [])
-              for site in sites:
-                  if not isinstance(site, dict): continue
-                  site_jar = site.get("jar")
-                  if isinstance(site_jar, str) and site_jar.strip():
-                      full_jar_url = site_jar
-                      if not site_jar.startswith("http://") and not site_jar.startswith("https://"):
-                          full_jar_url = urljoin(active_target_url, site_jar) if active_target_url else site_jar
-                      
-                      jar_basename = os.path.basename(urlparse(full_jar_url).path) or "jar.jar"
-                      save_jar_path = os.path.join(lib_dir, jar_basename)
-                      download_file(full_jar_url, save_jar_path, base_url=active_target_url)
+        if not success_download and HAS_CFFI:
+            try:
+                response = cffi_requests.get(target_url, impersonate="chrome120", timeout=25)
+                if response.content and len(response.content) > 50:
+                    try:
+                        parse_tvbox_content(response.content, target_url)
+                        fetched_content = response.content
+                        success_download = True
+                        print(f"  -> ✅ 通过 TLS 指纹穿透成功下载至: {api_path}")
+                        break
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+                
+        if success_download:
+            break
+            
+    if not success_download:
+        if os.path.exists(api_path):
+            with open(api_path, 'rb') as f:
+                fetched_content = f.read()
+            success_download = True
+        else:
+            print(f"  --------------------------------------------------")
+            print(f"  💡 【手动接管免拦截指南】：")
+            print(f"     1. 请在浏览器中打开：{active_target_url}")
+            print(f"     2. 复制内容并粘贴到此处")
+            print(f"  --------------------------------------------------")
+            pasted_content = input("     📋 请粘贴内容并回车（若本地已有 api.json 请直接回车跳过）: ").strip()
+            if pasted_content:
+                fetched_content = pasted_content.encode('utf-8', errors='ignore')
+                success_download = True
+            elif os.path.exists(api_path):
+                with open(api_path, 'rb') as f:
+                    fetched_content = f.read()
+                success_download = True
+            else:
+                return False
 
-                      if site_jar.lower().endswith('.php') and '?.jar' not in site_jar:
-                          site["jar"] = site_jar + "?.jar"
+    with open(api_path, 'wb') as f:
+        f.write(fetched_content)
 
-                  ext = site.get("ext")
-                  if isinstance(ext, str) and ext.strip():
-                      if (ext.startswith("http://") or ext.startswith("https://")) and not any(k in ext for k in ['22776', 'api', 'server']):
-                          filename = os.path.basename(ext.split('?')[0]) or "ext.json"
-                          save_path = os.path.join(lib_dir, filename)
-                          if download_file(ext, save_path, base_url=active_target_url):
-                              site["ext"] = f"./lib/{filename}"
+    try:
+        json_data, cleaned_text = parse_tvbox_content(fetched_content, active_target_url)
 
-              # 处理 lives 直播源
-              lives = json_data.get("lives", [])
-              for live in lives:
-                  if not isinstance(live, dict): continue
-                  url = live.get("url", "")
-                  if isinstance(url, str) and url.strip() and (url.startswith("http://") or url.startswith("https://")):
-                      filename = os.path.basename(url.split('?')[0]) or "live.m3u"
-                      save_path = os.path.join(target_dir, "live", filename)
-                      if download_file(url, save_path, base_url=active_target_url):
-                          live["url"] = f"./live/{filename}"
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, ensure_ascii=False, indent=2)
+        print(f"  -> ✅ 成功解析并生成: {output_path}")
+            
+    except Exception as e:
+        print(f"  -> ❌ 解析失败: {e}")
+        return False
 
-              return json_data
+    print("\n正在通过增强下载器抓取关联资源（Spider/Ext/Lives）并生成本地版...")
+    
+    local_json_data = json.loads(json.dumps(json_data))
+    local_json_data = process_spider_and_jars(local_json_data, target_dir, active_target_url)
 
-          # 自动初始化 sources_list.txt（包含茄子库和无意云的多备用地址）
-          default_sources_content = (
-              "茄子库,http://boluo.live | http://vip.boluo.live | http://李白.shop | https://700sjro44343.vicp.fun/vip/2505/qiezi/tv.php | https://700sjro44343.vicp.fun/vip/2505/qiezi/duo.txt\n"
-              "无意云,https://yc.wya6.cn/wykj.php | https://yc.wya6.cn/wyxs.php\n"
-          )
+    with open(local_json_path, 'w', encoding='utf-8') as f:
+        json.dump(local_json_data, f, ensure_ascii=False, indent=2)
+        
+    print(f"  -> 🎉 【{folder_name}】全部处理完成！本地版配置: {local_json_path}\n")
+    return True
 
-          if not os.path.exists('sources_list.txt'):
-              with open('sources_list.txt', 'w', encoding='utf-8') as f:
-                  f.write(default_sources_content)
-          else:
-              with open('sources_list.txt', 'r', encoding='utf-8') as f:
-                  existing_content = f.read()
-              if "茄子库" not in existing_content and "无意云" not in existing_content:
-                  with open('sources_list.txt', 'a', encoding='utf-8') as f:
-                      f.write("\n" + default_sources_content)
+def step1_only_download_and_convert():
+    print("\n--- 【步骤 1：仅下载并解密订阅源】 ---")
+    folder_name = select_or_input_folder(require_api_converted=False)
+    if not folder_name: return
+    target_url = input("请输入订阅链接（支持用 | 输入多个备用地址，输入 b 返回）: ").strip()
+    if target_url.lower() == 'b' or not target_url: return
+    process_single_task(folder_name, target_url)
 
-          old_state = {}
-          if os.path.exists(state_file):
-              try:
-                  with open(state_file, 'r', encoding='utf-8') as f:
-                      old_state = json.load(f)
-              except:
-                  pass
+def step3_one_click_workflow():
+    print("\n--- 【步骤 3：一键完整处理单个源】 ---")
+    folder_name = select_or_input_folder(require_api_converted=False)
+    if not folder_name: return
+    target_url = input("请输入订阅链接（支持用 | 输入多个备用地址，输入 b 返回）: ").strip()
+    if target_url.lower() == 'b' or not target_url: return
+    process_single_task(folder_name, target_url)
 
-          new_state = {}
-          sources_raw = []
-          if os.path.exists('sources_list.txt'):
-              with open('sources_list.txt', 'r', encoding='utf-8') as f:
-                  sources_raw = [line.strip() for line in f if line.strip()]
+def step4_batch_download_from_txt():
+    print("\n--- 【步骤 4：通过 TXT 文件批量下载与本地化】 ---")
+    txt_path = "sources_list.txt"
+    if not os.path.exists(txt_path):
+        sample_content = (
+            "茄子库,http://boluo.live | http://vip.boluo.live | http://李白.shop | https://700sjro44343.vicp.fun/vip/2505/qiezi/tv.php | https://700sjro44343.vicp.fun/vip/2505/qiezi/duo.txt\n"
+            "无意云,https://yc.wya6.cn/wykj.php | https://yc.wya6.cn/wyxs.php\n"
+        )
+        with open(txt_path, 'w', encoding='utf-8') as f: f.write(sample_content)
+        print(f"📄 已自动创建 {txt_path} 示例文件。")
+        return
+    
+    batch_tasks = []
+    with open(txt_path, 'r', encoding='utf-8', errors='ignore') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'): continue
+            parts = line.split(',', 1) if ',' in line else line.split(None, 1)
+            if len(parts) == 2:
+                batch_tasks.append((parts[0].strip(), parts[1].strip()))
+                
+    for idx, (folder_name, target_url) in enumerate(batch_tasks, 1):
+        print(f"==================================================")
+        print(f"🔄 正在处理第 {idx}/{len(batch_tasks)} 个任务: 文件夹【{folder_name}】")
+        print(f"==================================================")
+        try:
+            process_single_task(folder_name, target_url)
+        except Exception as e:
+            print(f"  -> ❌ 任务执行异常: {e}")
+    print(f"🎉 批量下载与本地化全部执行完毕！")
 
-          new_sources_lines = []
-          source_results = []
+def main():
+    while True:
+        print("\n==================================================")
+        print("       TVBox 本地便携免安装助手（备用地址增强版）     ")
+        print("==================================================")
+        print("1. 仅下载并解密订阅源 (输入链接 -> 生成 api_改.json)")
+        print("2. 依据已有 api_改.json 下载关联资源并本地化 (选择文件夹)")
+        print("3. 一键完整处理单个源 (输入文件夹 + 链接 -> 全套本地化)")
+        print("4. 批量下载与多个订阅源 (读取 sources_list.txt 文件)")
+        print("0. 退出程序")
+        print("--------------------------------------------------")
+        
+        choice = input("请选择操作编号 [0-4]: ").strip()
+        if choice == '1':
+            step1_only_download_and_convert()
+        elif choice == '2':
+            folder_name = select_or_input_folder(require_api_converted=True)
+            if folder_name:
+                target_dir = os.path.join("./sources_files", folder_name)
+                api_path = os.path.join(target_dir, "api_改.json")
+                local_json_path = os.path.join(target_dir, "api_本地版.json")
+                if os.path.exists(api_path):
+                    with open(api_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    data = process_spider_and_jars(data, target_dir)
+                    with open(local_json_path, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
+                    print(f"🎉 关联资源补下完毕，已生成: {local_json_path}")
+                else:
+                    print(f"❌ 未找到 {api_path}")
+        elif choice == '3':
+            step3_one_click_workflow()
+        elif choice == '4':
+            step4_batch_download_from_txt()
+        elif choice == '0':
+            print("👋 感谢使用，再见！")
+            break
 
-          for idx, line in enumerate(sources_raw, 1):
-              if line.startswith('#'):
-                  new_sources_lines.append(line)
-                  continue
-              
-              parts = line.split(',', 1)
-              name = parts[0].strip() if len(parts) > 1 else f'源{idx}'
-              url_part = parts[1] if len(parts) > 1 else line
-              urls = [u.strip() for u in re.split(r'[|\s]+', url_part) if u.strip().startswith('http')]
-              
-              if not urls:
-                  source_results.append(f'📌 <b>源 [{idx}] ({name})</b>\n状态: ❌ 失败 (未找到有效网址)')
-                  new_sources_lines.append(line)
-                  continue
-                  
-              working_url = None
-              fail_details = []
-              fetched_content = None
-              parsed_json = None
-              
-              for u_idx, url in enumerate(urls, 1):
-                  addr_type = '主地址' if u_idx == 1 else f'备用地址 {u_idx-1}'
-                  success = False
-                  last_err = ''
-                  
-                  parsed_u = urlparse(url)
-                  domain_referer = f"{parsed_u.scheme}://{parsed_u.netloc}/"
-                  
-                  for ua in USER_AGENTS:
-                      try:
-                          res = requests.get(url, headers={'User-Agent': ua, 'Referer': domain_referer}, timeout=30, verify=False)
-                          # 核心：允许 456 等返回状态码，只要有字节内容就尝试深度解码
-                          if res.content and len(res.content) > 50:
-                              try:
-                                  parsed_json, _ = parse_tvbox_content(res.content, url)
-                                  fetched_content = res.content
-                                  success = True
-                                  break
-                              except Exception as inner_ex:
-                                  last_err = f'解析失败: {inner_ex}'
-                          else:
-                              last_err = f'HTTP状态码 {res.status_code}'
-                      except Exception as e:
-                          last_err = f'异常 {str(e)}'
-                  
-                  if not success and HAS_CFFI:
-                      try:
-                          res = cffi_requests.get(url, impersonate="chrome120", timeout=30)
-                          if res.content and len(res.content) > 50:
-                              parsed_json, _ = parse_tvbox_content(res.content, url)
-                              fetched_content = res.content
-                              success = True
-                      except Exception as e:
-                          last_err = f'CFFI异常 {str(e)}'
-
-                  if success:
-                      working_url = url
-                      break
-                  else:
-                      fail_details.append(f'{addr_type} ({url}): {last_err}')
-                      
-              if not working_url:
-                  details_str = '\n  '.join(fail_details)
-                  source_results.append(f'📌 <b>源 [{idx}] ({name})</b>\n状态: ❌ <b>全部地址失效</b>\n  {details_str}')
-                  new_sources_lines.append(line)
-              else:
-                  jar_status_tip = ''
-                  try:
-                      target_dir = os.path.join("./sources_files", name)
-                      os.makedirs(target_dir, exist_ok=True)
-                      
-                      api_path = os.path.join(target_dir, "api.json")
-                      output_path = os.path.join(target_dir, "api_改.json")
-                      local_json_path = os.path.join(target_dir, "api_本地版.json")
-
-                      with open(api_path, 'wb') as f:
-                          f.write(fetched_content)
-
-                      with open(output_path, 'w', encoding='utf-8') as f:
-                          json.dump(parsed_json, f, ensure_ascii=False, indent=2)
-
-                      # 核心：完美执行与本地端一致的 spider.jar、lib 及伪装后缀本地化流水线
-                      local_json_data = json.loads(json.dumps(parsed_json))
-                      local_json_data = process_spider_and_jars(local_json_data, target_dir, working_url)
-
-                      with open(local_json_path, 'w', encoding='utf-8') as f:
-                          json.dump(local_json_data, f, ensure_ascii=False, indent=2)
-
-                      jar_status_tip = ' | 📦 <b>lib文件夹与spider.jar下载同步完成</b>'
-                      normalized_str = json.dumps(parsed_json, sort_keys=True, ensure_ascii=False)
-                  except Exception as je:
-                      jar_status_tip = f' | ❌ <b>本地化异常: {je}</b>'
-                      normalized_str = re.sub(r'\s+', '', fetched_content.decode('utf-8', errors='ignore'))
-
-                  content_hash = hashlib.md5(normalized_str.encode('utf-8')).hexdigest()
-                  prev_info = old_state.get(name, {})
-                  prev_hash = prev_info.get('hash', '')
-                  prev_time = prev_info.get('time', bj_time)
-                  
-                  update_status = '✨ 内容已更新' if content_hash != prev_hash else '🟢 内容无变化'
-                  last_update_time = bj_time if content_hash != prev_hash else prev_time
-                      
-                  new_state[name] = {'hash': content_hash, 'time': last_update_time}
-                  source_results.append(f'📌 <b>源 [{idx}] ({name})</b>\n状态: ✅ 成功 | {update_status}{jar_status_tip}\n地址: {working_url}\n最后更新时间: {last_update_time}')
-                  
-                  other_urls = [u for u in urls if u != working_url]
-                  reordered_line = f'{name},' + ' | '.join([working_url] + other_urls) if len(parts) > 1 else working_url
-                  new_sources_lines.append(reordered_line)
-
-          with open(state_file, 'w', encoding='utf-8') as f:
-              json.dump(new_state, f, ensure_ascii=False, indent=2)
-
-          with open('sources_list.txt', 'w', encoding='utf-8') as f:
-              f.write('\n'.join(new_sources_lines) + '\n')
-
-          details_text = '\n\n'.join(source_results)
-          message = f'<b>📊 TVBox 智能备用源独立监控报告</b>\n\n{details_text}'
-
-          for i in range(1, 11):
-              token = os.getenv(f'TG_TOKEN_{i}')
-              chat_id = os.getenv(f'TG_CHAT_{i}')
-              if token and chat_id:
-                  try:
-                      requests.post(f'https://api.telegram.org/bot{token}/sendMessage', json={
-                          'chat_id': chat_id, 'text': message, 'parse_mode': 'HTML'
-                      }, timeout=10)
-                  except Exception:
-                      pass
-          EOF
-          python run_helper.py
-
-      - name: Commit and Push Changes
-        run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.io'
-          git add -f -A
-          if git diff --staged --quiet; then
-            echo "No changes detected, skipping commit."
-          else
-            git commit -m "Auto update TVBox sources with complete lib and spider.jar download pipeline"
-            git push
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+if __name__ == '__main__':
+    main()
